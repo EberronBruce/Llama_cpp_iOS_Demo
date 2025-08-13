@@ -3,6 +3,8 @@ import llama
 import MachO
 import Darwin
 
+let isDebugMode = true
+
 enum LlamaError: Error {
     case couldNotInitializeContext
     case batchCapacityExceeded
@@ -31,7 +33,6 @@ actor LlamaContext {
     
     private static var backendInitialized = false
 
-
     var n_len: Int32 = 1024
     var n_cur: Int32 = 0
 
@@ -58,8 +59,15 @@ actor LlamaContext {
         self._tempData = nil
         let sparams = llama_sampler_chain_default_params()
         self.sampling = llama_sampler_chain_init(sparams)
-        llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
-        llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
+        
+        if isDebugMode {
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.0))
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(0))
+        } else {
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
+            llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
+        }
+        
         vocab = llama_model_get_vocab(model)
         
         print("Model, context, and vocab initialized successfully")
@@ -262,35 +270,22 @@ actor LlamaContext {
         return llamaContext
     }
 
-
-    
-    
-    
     func model_info() async -> String {
         let capacity = 256
         let result = UnsafeMutablePointer<Int8>.allocate(capacity: capacity)
-//        let result = UnsafeMutablePointer<Int8>.allocate(capacity: 256)
         result.initialize(repeating: Int8(0), count: capacity)
         defer {
             result.deinitialize(count: capacity)
             result.deallocate()
         }
 
-        // TODO: this is probably very stupid way to get the string from C
-
-        let nChars = llama_model_desc(model, result, 256)
-        let bufferPointer = UnsafeBufferPointer(start: result, count: Int(nChars))
-
-        var SwiftString = ""
-        for char in bufferPointer {
-            SwiftString.append(Character(UnicodeScalar(UInt8(char))))
+        let nChars = llama_model_desc(model, result, capacity)
+        guard nChars > 0 else {
+            return "[Failed to get model description]"
         }
 
-        return SwiftString
+        return String(cString: result)
     }
-    
-    
-    
 
     func get_n_tokens() -> Int32 {
         return batch.n_tokens;
@@ -312,7 +307,12 @@ actor LlamaContext {
         }
 
         for id in tokens_list {
-            print(String(cString: token_to_piece(token: id) + [0]))
+            let cchars = token_to_piece(token: id)
+            if let tokenString = String(bytes: cchars.map { UInt8(bitPattern: $0) }, encoding: .utf8) {
+                print(tokenString)
+            } else {
+                print("[Invalid UTF8 token]")
+            }
         }
 
         // Clear batch tokens count without freeing batch buffers to reuse allocated memory
