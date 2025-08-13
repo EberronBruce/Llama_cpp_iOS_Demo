@@ -307,12 +307,8 @@ actor LlamaContext {
         }
 
         for id in tokens_list {
-            let cchars = token_to_piece(token: id)
-            if let tokenString = String(bytes: cchars.map { UInt8(bitPattern: $0) }, encoding: .utf8) {
-                print(tokenString)
-            } else {
-                print("[Invalid UTF8 token]")
-            }
+            let tokenString = token_to_piece(token: id)
+            print(tokenString)
         }
 
         // Clear batch tokens count without freeing batch buffers to reuse allocated memory
@@ -365,18 +361,26 @@ actor LlamaContext {
             print("\n")
             is_done = true
 
-            if let tempData = _tempData, let decoded = String(data: tempData, encoding: .utf8) {
-                defer { _tempData = nil }
-                return decoded
-            } else {
-                print("Warning: _tempData contained invalid UTF-8")
-                defer { _tempData = nil }
-                return ""
+            if let tempData = _tempData {
+                if let decoded = String(data: tempData, encoding: .utf8) {
+                    defer { _tempData = nil }
+                    return decoded
+                } else {
+                    // Try to find the largest valid UTF-8 prefix
+                    for cut in stride(from: tempData.count - 1, through: 0, by: -1) {
+                        if let partialDecoded = String(data: tempData.prefix(cut), encoding: .utf8), !partialDecoded.isEmpty {
+                            defer { _tempData = nil }
+                            return partialDecoded
+                        }
+                    }
+                    print("Warning: _tempData contained invalid UTF-8 that cannot be fixed")
+                    defer { _tempData = nil }
+                    return ""
+                }
             }
         }
 
-        let new_token_cchars = token_to_piece(token: new_token_id)
-        let new_token_str = appendBytesAndExtractString(new_token_cchars)
+        let new_token_str = token_to_piece(token: new_token_id)
         
         print(new_token_str)
         
@@ -536,7 +540,6 @@ actor LlamaContext {
     
     private func tokenize(text: String, add_bos: Bool) -> [llama_token] {
         let utf8Count = text.utf8.count
-//        let n_tokens = utf8Count + (add_bos ? 1 : 0) + 1
         let n_tokens = max(utf8Count * 2, utf8Count + (add_bos ? 1 : 0) + 1)
         let tokens = UnsafeMutablePointer<llama_token>.allocate(capacity: n_tokens)
         defer {
@@ -552,7 +555,13 @@ actor LlamaContext {
     }
 
     
-    private func token_to_piece(token: llama_token) -> [CChar] {
+    
+    private func token_to_piece(token: llama_token) -> String {
+        // Special handling for EOT token (50256)
+        if token == 50256 {
+            return "" // or return "[EOT]" if you want visible marker
+        }
+        
         let initialCapacity = 8
         let result = UnsafeMutablePointer<Int8>.allocate(capacity: initialCapacity)
         result.initialize(repeating: 0, count: initialCapacity)
@@ -560,32 +569,41 @@ actor LlamaContext {
             result.deinitialize(count: initialCapacity)
             result.deallocate()
         }
+
         let nTokens = llama_token_to_piece(vocab, token, result, Int32(initialCapacity), 0, false)
 
         if nTokens < 0 {
             let newCapacity = Int(-nTokens) + 1
             guard newCapacity > 0 else {
                 print("Error: llama_token_to_piece returned invalid negative token count \(nTokens)")
-                return []
+                return ""
             }
+
             let newResult = UnsafeMutablePointer<Int8>.allocate(capacity: newCapacity)
             newResult.initialize(repeating: 0, count: newCapacity)
             defer {
                 newResult.deinitialize(count: newCapacity)
                 newResult.deallocate()
             }
+
             let nNewTokens = llama_token_to_piece(vocab, token, newResult, Int32(newCapacity), 0, false)
             guard nNewTokens > 0 else {
+                // Here: if still zero or invalid length, return placeholder or empty string
                 print("Error: llama_token_to_piece failed on second attempt with \(nNewTokens)")
-                return []
+                return ""
             }
+
             newResult[Int(nNewTokens)] = 0
-            return Array(UnsafeBufferPointer(start: newResult, count: Int(nNewTokens)))
+            return String(cString: newResult)
         } else if nTokens > 0 {
-            return Array(UnsafeBufferPointer(start: result, count: Int(nTokens)))
+            return String(cString: result)
         } else {
-            print("Error: llama_token_to_piece returned zero or invalid token length \(nTokens)")
-            return []
+            // nTokens == 0 case — handle gracefully here
+            // You can return a placeholder like "[?]" or simply ""
+            // Also consider logging token ID for debugging
+
+            print("Warning: llama_token_to_piece returned zero length for token id \(token)")
+            return ""
         }
     }
     
@@ -658,36 +676,6 @@ actor LlamaContext {
     
     private func llama_batch_clear(_ batch: inout llama_batch) {
         batch.n_tokens = 0
-    }
-    
-    /// Append bytes and try to decode a valid UTF8 prefix.
-    /// Returns decoded string (possibly empty)
-    private func appendBytesAndExtractString(_ bytes: [CChar]) -> String {
-        // Convert [CChar] to [UInt8] (filter out zero terminator if present)
-        var bytesU8 = bytes.map { UInt8(bitPattern: $0) }
-        // Remove trailing zeros
-        while bytesU8.last == 0 { bytesU8.removeLast() }
-
-        // Initialize temp buffer if needed
-        if _tempData == nil { _tempData = Data() }
-        _tempData!.append(contentsOf: bytesU8)
-
-        // Try to decode as UTF8
-        if let s = String(data: _tempData!, encoding: .utf8) {
-            _tempData = Data()
-            return s
-        }
-
-        // If full decode fails, try largest valid prefix
-        for cut in stride(from: _tempData!.count - 1, through: 0, by: -1) {
-            if let s = String(data: _tempData!.prefix(cut), encoding: .utf8), !s.isEmpty {
-                // Keep remainder for next time
-                let remainder = _tempData!.suffix(from: cut)
-                _tempData = Data(remainder)
-                return s
-            }
-        }
-        return ""
     }
     
     
