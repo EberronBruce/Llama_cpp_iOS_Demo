@@ -100,13 +100,13 @@ actor LlamaContext {
         }
     }
     
-
+    
     static func create_context(path: String) async throws -> LlamaContext {
         if !backendInitialized {
             llama_backend_init()
             backendInitialized = true
         }
-        
+
         // Detect RAM budget before trying to load
         let availableMem = getAvailableMemory()
         print("[INFO] Available memory: \(availableMem / 1024 / 1024) MB")
@@ -114,12 +114,14 @@ actor LlamaContext {
         // Make a starting guess based on memory
         var start_n_ctx: Int32
         var start_n_gpu_layers: Int32
-        
+        let hadSavedConfig: Bool
+
         if let savedLayers = UserDefaults.standard.value(forKey: "lastWorkingGpuLayers") as? Int32,
            let savedCtx = UserDefaults.standard.value(forKey: "lastWorkingCtx") as? Int32 {
             print("[INFO] Using saved config: n_ctx=\(savedCtx), n_gpu_layers=\(savedLayers)")
             start_n_ctx = savedCtx
             start_n_gpu_layers = savedLayers
+            hadSavedConfig = true
         } else {
             if availableMem < 2_000_000_000 {
                 start_n_ctx = 512
@@ -131,53 +133,87 @@ actor LlamaContext {
                 start_n_ctx = 2048
                 start_n_gpu_layers = 999
             }
+            hadSavedConfig = false
         }
 
         print("[INFO] Starting guess: n_ctx=\(start_n_ctx), n_gpu_layers=\(start_n_gpu_layers)")
 
         var model_params = llama_model_default_params()
+        var model: OpaquePointer? = nil
 
     #if targetEnvironment(simulator)
+        // Simulator never has GPU acceleration
         model_params.n_gpu_layers = 0
         print("[INFO] Running in simulator. Forcing n_gpu_layers=0.")
-        guard let model = llama_model_load_from_file(path, model_params) else {
+        guard let m = llama_model_load_from_file(path, model_params) else {
             throw LlamaError.couldNotInitializeContext
         }
+        model = m
     #else
-        // Try GPU layers from guess down
-        var tryGpuLayersList: [Int32] = []
-        if start_n_gpu_layers >= 999 {
-            tryGpuLayersList = [1024, 512, 256, 128, 64, 32, 16, 8, 0]
-        } else if start_n_gpu_layers >= 64 {
-            tryGpuLayersList = [start_n_gpu_layers, 32, 16, 8, 0]
-        } else {
-            tryGpuLayersList = [start_n_gpu_layers, 8, 0]
-        }
-
-        var model: OpaquePointer? = nil
-        var lastError: Error?
-
-        for candidate in tryGpuLayersList {
-            model_params.n_gpu_layers = candidate
-            print("[INFO] Attempting model load with n_gpu_layers=\(candidate)...")
+        // On device: optionally try FULL Metal push first (only if no saved config).
+        if !hadSavedConfig {
+            print("[INFO] Attempting full Metal load (all layers on GPU first try)…")
+            
+            // Try full offload
+            model_params.n_gpu_layers = Int32.max
             if let m = llama_model_load_from_file(path, model_params) {
+                print("[SUCCESS] Full Metal load succeeded with n_gpu_layers=\(model_params.n_gpu_layers).")
                 model = m
-                print("[SUCCESS] Model loaded with n_gpu_layers=\(candidate).")
-                UserDefaults.standard.set(candidate, forKey: "lastWorkingGpuLayers")
+                UserDefaults.standard.set(model_params.n_gpu_layers, forKey: "lastWorkingGpuLayers")
                 UserDefaults.standard.set(start_n_ctx, forKey: "lastWorkingCtx")
-                break
             } else {
-                print("[FAIL] Could not load with n_gpu_layers=\(candidate). Trying next lower setting...")
+                print("[FAIL] Full Metal load failed. Falling back to CPU-only…")
+                model_params.n_gpu_layers = 0 // CPU fallback
+                guard let cpuModel = llama_model_load_from_file(path, model_params) else {
+                    throw LlamaError.couldNotInitializeContext
+                }
+                model = cpuModel
             }
         }
 
-        // If no model loaded, explicitly try CPU-only fallback
+        // If full push didn’t work (or we had a saved config), try descending lists.
+        if model == nil {
+            var tryGpuLayersList: [Int32] = []
+
+            // When no saved config, prepend a big first try (if we didn’t already)
+            if !hadSavedConfig {
+                tryGpuLayersList.append(1024)
+            }
+
+            if start_n_gpu_layers >= 999 {
+                tryGpuLayersList += [512, 256, 128, 64, 32, 16, 8, 0]
+            } else if start_n_gpu_layers >= 64 {
+                tryGpuLayersList += [start_n_gpu_layers, 32, 16, 8, 0]
+            } else {
+                tryGpuLayersList += [start_n_gpu_layers, 8, 0]
+            }
+
+            // Deduplicate while preserving order
+            var seen = Set<Int32>()
+            tryGpuLayersList = tryGpuLayersList.filter { seen.insert($0).inserted }
+
+            for candidate in tryGpuLayersList {
+                model_params.n_gpu_layers = candidate
+                print("[INFO] Attempting model load with n_gpu_layers=\(candidate)…")
+                if let m = llama_model_load_from_file(path, model_params) {
+                    print("[SUCCESS] Model loaded with n_gpu_layers=\(candidate).")
+                    model = m
+                    UserDefaults.standard.set(candidate, forKey: "lastWorkingGpuLayers")
+                    UserDefaults.standard.set(start_n_ctx, forKey: "lastWorkingCtx")
+                    break
+                } else {
+                    print("[FAIL] Could not load with n_gpu_layers=\(candidate). Trying next…")
+                }
+            }
+        }
+
+        // If no model loaded at all, explicit CPU-only attempt (safety net)
         if model == nil {
             print("[WARN] GPU attempts failed. Trying CPU-only fallback.")
             model_params.n_gpu_layers = 0
             if let m = llama_model_load_from_file(path, model_params) {
-                model = m
                 print("[SUCCESS] CPU-only model load succeeded.")
+                model = m
                 UserDefaults.standard.set(0, forKey: "lastWorkingGpuLayers")
                 UserDefaults.standard.set(start_n_ctx, forKey: "lastWorkingCtx")
             } else {
@@ -198,24 +234,22 @@ actor LlamaContext {
         ctx_params.n_threads = Int32(n_threads)
         ctx_params.n_threads_batch = Int32(n_threads)
 
-        // After your normal model/context loading attempt
+        // Context init + CPU-only retry if Metal backend fails at this stage
         guard let context = llama_init_from_model(modelFinal, ctx_params) else {
             llama_model_free(modelFinal)
-            print("[WARN] Context init failed with GPU layers \(model_params.n_gpu_layers), retrying CPU-only...")
-            
-            // Retry CPU-only model load & context init
+            print("[WARN] Context init failed with GPU layers \(model_params.n_gpu_layers), retrying CPU-only…")
+
             model_params.n_gpu_layers = 0
             guard let cpuModel = llama_model_load_from_file(path, model_params) else {
                 print("[ERROR] CPU-only model load failed.")
                 throw LlamaError.couldNotInitializeContext
             }
-            
             guard let cpuContext = llama_init_from_model(cpuModel, ctx_params) else {
                 llama_model_free(cpuModel)
                 print("[ERROR] CPU-only context init failed.")
                 throw LlamaError.couldNotInitializeContext
             }
-            
+
             let cpuLlamaContext = LlamaContext(model: cpuModel, context: cpuContext)
             let info = await cpuLlamaContext.model_info()
             print("[INFO] Loaded model description (CPU-only fallback): \(info)")
@@ -225,9 +259,9 @@ actor LlamaContext {
         let llamaContext = LlamaContext(model: modelFinal, context: context)
         let info = await llamaContext.model_info()
         print("[INFO] Loaded model description: \(info)")
-
         return llamaContext
     }
+
 
     
     
