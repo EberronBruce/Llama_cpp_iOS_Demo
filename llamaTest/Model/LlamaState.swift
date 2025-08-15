@@ -152,12 +152,26 @@ class LlamaState: ObservableObject {
                 self.messages.append(ChatMessage(text: text, isUser: true))
             }
             
-            let result = await llamaContext.generateResponse(maxTokens: 128)
+            let result = await llamaContext.generateResponse(maxTokens: 256)
             await MainActor.run {
-//                self.messageLog += "It: \(result)"
-//                self.messageLog += "\nDone\n"
+                //                self.messageLog += "It: \(result)"
+                //                self.messageLog += "\nDone\n"
                 self.messages.append(ChatMessage(text: result, isUser: false))
             }
+//            let result = await llamaContext.completion_loop()
+            
+//            await llamaContext.feedPrompt(text)
+//            
+//            while await !llamaContext.is_done {
+//                let result = await llamaContext.completion_loop()
+//                print(result, terminator: "")
+//                
+//                await MainActor.run {
+//                    //                self.messageLog += "It: \(result)"
+//                    //                self.messageLog += "\nDone\n"
+//                    self.messages.append(ChatMessage(text: result, isUser: false))
+//                }
+//            }
         }
 
 
