@@ -17,6 +17,7 @@ struct Model: Identifiable {
 
 @MainActor
 class LlamaState: ObservableObject {
+    @Published var messages: [ChatMessage] = []
     @Published var messageLog = ""
     @Published var cacheCleared = false
     @Published var downloadedModels: [Model] = []
@@ -113,8 +114,10 @@ class LlamaState: ObservableObject {
     func loadModel(modelUrl: URL?) async throws {
         if let modelUrl {
             messageLog += "Loading model...\n"
+            self.messages.append(ChatMessage(text: "Loading model...", isUser: false))
             llamaContext = try await LlamaContext.create_context(path: modelUrl.path())
             messageLog += "Loaded model \(modelUrl.lastPathComponent)\n"
+            self.messages.append(ChatMessage(text: "Loaded model \(modelUrl.lastPathComponent)", isUser: false))
 
             // Assuming that the model is successfully loaded, update the downloaded models
             updateDownloadedModels(modelName: modelUrl.lastPathComponent, status: "downloaded")
@@ -134,36 +137,58 @@ class LlamaState: ObservableObject {
             return
         }
 
-        let t_start = DispatchTime.now().uptimeNanoseconds
-        await llamaContext.completion_init(text: text)
-        let t_heat_end = DispatchTime.now().uptimeNanoseconds
-        let t_heat = Double(t_heat_end - t_start) / NS_PER_S
+//        let t_start = DispatchTime.now().uptimeNanoseconds
+//        await llamaContext.completion_init(text: text)
+//        let t_heat_end = DispatchTime.now().uptimeNanoseconds
+//        let t_heat = Double(t_heat_end - t_start) / NS_PER_S
 
-        messageLog += "\(text)"
-
-        Task.detached {
-            while await !llamaContext.is_done {
-                let result = await llamaContext.completion_loop()
-                await MainActor.run {
-                    self.messageLog += "\(result)"
-                }
-            }
-
-            let t_end = DispatchTime.now().uptimeNanoseconds
-            let t_generation = Double(t_end - t_heat_end) / self.NS_PER_S
-            let tokens_per_second = Double(await llamaContext.n_len) / t_generation
-
-            await llamaContext.clear()
+        
+        Task.detached(priority: .userInitiated) {
+            
+            await llamaContext.feedPrompt(text)
 
             await MainActor.run {
-                self.messageLog += """
-                    \n
-                    Done
-                    Heat up took \(t_heat)s
-                    Generated \(tokens_per_second) t/s\n
-                    """
+//                self.messageLog += "Me: \(text)\n"
+                self.messages.append(ChatMessage(text: text, isUser: true))
+            }
+            
+            let result = await llamaContext.generateResponse(maxTokens: 128)
+            await MainActor.run {
+//                self.messageLog += "It: \(result)"
+//                self.messageLog += "\nDone\n"
+                self.messages.append(ChatMessage(text: result, isUser: false))
             }
         }
+
+
+//        Task.detached {
+//            while await !llamaContext.is_done {
+////                let result = await llamaContext.completion_loop()
+//                let result = await llamaContext.generateResponse(maxTokens: 128)
+//                await MainActor.run {
+//                    self.messageLog += "It: \(result)"
+//                }
+//            }
+//            
+//            await MainActor.run {
+//                self.messageLog += "\nDone\n"
+//            }
+
+//            let t_end = DispatchTime.now().uptimeNanoseconds
+//            let t_generation = Double(t_end - t_heat_end) / self.NS_PER_S
+//            let tokens_per_second = Double(await llamaContext.n_len) / t_generation
+
+//            await llamaContext.clear()
+
+//            await MainActor.run {
+//                self.messageLog += """
+//                    \n
+//                    Done
+//                    Heat up took \(t_heat)s
+//                    Generated \(tokens_per_second) t/s\n
+//                    """
+//            }
+//        }
     }
 
     func bench() async {

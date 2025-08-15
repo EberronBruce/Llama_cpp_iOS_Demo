@@ -3,7 +3,7 @@ import llama
 import MachO
 import Darwin
 
-let isDebugMode = true
+let isDebugMode = false
 
 enum LlamaError: Error {
     case couldNotInitializeContext
@@ -37,6 +37,8 @@ actor LlamaContext {
     var n_cur: Int32 = 0
 
     var n_decode: Int32 = 0
+    
+    private var nPast: Int32 = 0
 
     init(model: OpaquePointer, context: OpaquePointer) {
         self.batchCapacity = 512
@@ -60,19 +62,15 @@ actor LlamaContext {
         let sparams = llama_sampler_chain_default_params()
         self.sampling = llama_sampler_chain_init(sparams)
         
-        if isDebugMode {
-            llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.0))
-            llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(0))
-        } else {
-            llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.4))
-            llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
-        }
+        
+        llama_sampler_chain_add(self.sampling, llama_sampler_init_temp(0.5))
+        llama_sampler_chain_add(self.sampling, llama_sampler_init_dist(1234))
         
         vocab = llama_model_get_vocab(model)
         
         print("Model, context, and vocab initialized successfully")
     }
-
+    
     deinit {
         llama_sampler_free(sampling)
         llama_batch_free(batch)
@@ -80,6 +78,7 @@ actor LlamaContext {
         llama_model_free(model)
         llama_backend_free()
     }
+    
     
     // Returns available memory in bytes
     static func getAvailableMemory() -> UInt64 {
@@ -290,12 +289,101 @@ actor LlamaContext {
     func get_n_tokens() -> Int32 {
         return batch.n_tokens;
     }
+    
 
+    // MARK: - feedPrompt
+    func feedPrompt(_ text: String) {
+        resetConversation()
+        print("feedPrompt: \(text)")
+
+        // Always prepend the system prompt for standalone context
+        let systemPrompt = "You are a polite assistant. Only reply with a short, standalone response to the user’s input. Do not give examples, stories, exercises, invented content, or continue incomplete sentences.For greetings like 'Hello', respond with a greeting and optional follow-up question like 'How can I help you?'."
+        let prompt = "\(systemPrompt)\n\(text) <END>"
+
+        is_done = false
+
+        // Clear KV cache to make this prompt standalone
+        llama_memory_clear(llama_get_memory(context), true)
+        nPast = 0
+
+        let tokens = tokenize(text: prompt, add_bos: true)
+        guard !tokens.isEmpty else { return }
+
+        // Build batch with prompt tokens
+        llama_batch_clear(&batch)
+        for (i, tok) in tokens.enumerated() {
+            try? llama_batch_add(&batch, tok, nPast + Int32(i), [0], false, maxCapacity: batchCapacity)
+        }
+
+        if batch.n_tokens > 0 {
+            batch.logits[Int(batch.n_tokens) - 1] = 1
+        }
+
+        let rc = llama_decode(context, batch)
+        if rc != 0 {
+            print("feedPrompt: llama_decode failed with code \(rc)")
+            return
+        }
+
+        // Advance nPast only for this prompt
+        nPast += Int32(tokens.count)
+        n_cur = batch.n_tokens
+    }
+
+
+    
+    // MARK: - generateResponse
+    func generateResponse(maxTokens: Int = 128) -> String {
+        var response = ""
+        var logitsIndex: Int32 = max(0, batch.n_tokens - 1)
+
+        for _ in 0..<maxTokens {
+            let new_token_id = safeSamplerSample(tokenIndex: logitsIndex)
+            if new_token_id == LLAMA_INVALID_TOKEN || llama_vocab_is_eog(vocab, new_token_id) {
+                break
+            }
+
+            response += token_to_piece(token: new_token_id)
+
+            // Single-token batch for next step
+            llama_batch_clear(&batch)
+            try? llama_batch_add(&batch, new_token_id, nPast, [0], false, maxCapacity: batchCapacity)
+            batch.logits[0] = 1
+
+            let rc = llama_decode(context, batch)
+            if rc != 0 {
+                print("generateResponse: llama_decode failed with code \(rc)")
+                break
+            }
+
+            nPast += 1
+            logitsIndex = 0
+        }
+        
+        // Trim leading punctuation and whitespace
+        let trimmedResponse = response.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.punctuationCharacters)
+    
+        print("Response of LLM: \(response)")
+        return response
+    }
+
+
+
+
+    
+//    MARK: - Completion_init
     func completion_init(text: String) {
         print("attempting to complete \"\(text)\"")
 
         tokens_list = tokenize(text: text, add_bos: true)
         defer { _tempData = nil }
+
+        // ✅ Ensure n_len allows room for generation
+        if n_len <= tokens_list.count {
+            // Give room for 128 tokens of generation, or whatever you want
+            n_len = Int32(tokens_list.count + 128)
+        }
 
         let n_ctx = llama_n_ctx(context)
         let n_kv_req = tokens_list.count + (Int(n_len) - tokens_list.count)
@@ -311,24 +399,21 @@ actor LlamaContext {
             print(tokenString)
         }
 
-        // Clear batch tokens count without freeing batch buffers to reuse allocated memory
-        llama_batch_clear(&batch)
-
         do {
-            for i1 in 0..<tokens_list.count {
-                let i = Int(i1)
-                try llama_batch_add(&batch, tokens_list[i], Int32(i), [0], false, maxCapacity: batchCapacity)
+            for i in 0..<tokens_list.count {
+                try llama_batch_add(&batch, tokens_list[i], nPast + Int32(i), [0], false, maxCapacity: batchCapacity)
             }
         } catch {
             print("Error adding tokens to batch: \(error)")
             defer { _tempData = nil }
             return
         }
-        batch.logits[Int(batch.n_tokens) - 1] = 1 // true
+//        batch.logits[Int(batch.n_tokens) - 1] = 1 // true
 
         let decodeResult = llama_decode(context, batch)
         if decodeResult != 0 {
             if batch.n_tokens > 0 && !is_done {
+                print("In completion_init(): ")
                 print("Error: llama_decode failed with code \(decodeResult)")
                 defer { _tempData = nil }
                 is_done = true
@@ -339,80 +424,94 @@ actor LlamaContext {
         }
 
         n_cur = batch.n_tokens
+        nPast += Int32(tokens_list.count)
     }
 
+//MARK: - Completion loop
     func completion_loop() -> String {
-        var new_token_id: llama_token = 0
-        
         guard batch.n_tokens > 0 else {
             print("Error: batch has no tokens for sampling")
             is_done = true
             return ""
         }
 
-        new_token_id = safeSamplerSample(tokenIndex: batch.n_tokens - 1)
+        let new_token_id = safeSamplerSample(tokenIndex: batch.n_tokens - 1)
         guard new_token_id != LLAMA_INVALID_TOKEN else {
             print("Error: llama_sampler_sample failed or returned invalid token")
             is_done = true
             return ""
         }
 
+        // End of generation check
+//        if llama_vocab_is_eog(vocab, new_token_id) || n_cur == n_len {
+//            print("\n")
+//            is_done = true
+//
+//            if let tempData = _tempData {
+//                if let decoded = String(data: tempData, encoding: .utf8) {
+//                    defer { _tempData = nil }
+//                    return decoded
+//                } else {
+//                    // Try largest valid UTF-8 prefix
+//                    for cut in stride(from: tempData.count - 1, through: 0, by: -1) {
+//                        if let partialDecoded = String(data: tempData.prefix(cut), encoding: .utf8),
+//                           !partialDecoded.isEmpty {
+//                            defer { _tempData = nil }
+//                            return partialDecoded
+//                        }
+//                    }
+//                    print("Warning: _tempData contained invalid UTF-8 that cannot be fixed")
+//                    defer { _tempData = nil }
+//                    return ""
+//                }
+//            }
+//
+//            return ""
+//        }
+        
         if llama_vocab_is_eog(vocab, new_token_id) || n_cur == n_len {
-            print("\n")
             is_done = true
-
-            if let tempData = _tempData {
-                if let decoded = String(data: tempData, encoding: .utf8) {
-                    defer { _tempData = nil }
-                    return decoded
-                } else {
-                    // Try to find the largest valid UTF-8 prefix
-                    for cut in stride(from: tempData.count - 1, through: 0, by: -1) {
-                        if let partialDecoded = String(data: tempData.prefix(cut), encoding: .utf8), !partialDecoded.isEmpty {
-                            defer { _tempData = nil }
-                            return partialDecoded
-                        }
-                    }
-                    print("Warning: _tempData contained invalid UTF-8 that cannot be fixed")
-                    defer { _tempData = nil }
-                    return ""
-                }
+            if let tempData = _tempData, let decoded = String(data: tempData, encoding: .utf8) {
+                defer { _tempData = nil }
+                return decoded
             }
+            return ""
         }
 
         let new_token_str = token_to_piece(token: new_token_id)
-        
         print(new_token_str)
         
-        // Clear batch tokens count without freeing batch buffers to reuse allocated memory
-        llama_batch_clear(&batch)
-        
-        do{
+//        let n_ctx = llama_n_ctx(context)
+//        if nPast + 1 > n_ctx {
+//            print("⚠️ KV cache full, resetting conversation before generating more tokens")
+//            resetConversation()
+//        }
+
+        // Prepare next decode step
+        llama_batch_clear(&batch) // only clears counts, not KV cache
+        do {
             try llama_batch_add(&batch, new_token_id, n_cur, [0], true, maxCapacity: batchCapacity)
         } catch {
             print("Error adding tokens to batch: \(error)")
-            return "Error adding tokens to batch: \(error)"
+            return ""
         }
-        
 
+        n_cur += 1
         n_decode += 1
-        n_cur    += 1
-        
+
         let decodeResult = llama_decode(context, batch)
         if decodeResult != 0 {
-            if batch.n_tokens > 0 && !is_done {
-                print("Error: llama_decode failed with code \(decodeResult)")
-                defer { _tempData = nil }
-                is_done = true
-                return "Error: llama_decode failed with code \(decodeResult)"
-            } else {
-                print("Warning: llama_decode returned \(decodeResult), no tokens or already done, continuing")
-            }
+            print("In completion_loop: batch.n_tokens: \(batch.n_tokens)")
+            print("Error: llama_decode failed with code \(decodeResult)")
+            is_done = true
+            return ""
         }
 
         return new_token_str
     }
 
+
+//    MARK: - Bench
     func bench(pp: Int, tg: Int, pl: Int, nr: Int = 1) async -> String {
         var pp_avg: Double = 0
         var tg_avg: Double = 0
@@ -692,4 +791,14 @@ actor LlamaContext {
         }
     }
     
+    
+    func resetConversation() {
+        tokens_list.removeAll()
+        _tempData = nil
+        llama_memory_clear(llama_get_memory(context), true) // clears KV cache
+        nPast = 0
+        n_cur = 0
+        n_decode = 0
+        is_done = false
+    }
 }

@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-struct ContentView: View {
+struct OldContentView: View {
     @StateObject var llamaState = LlamaState()
     @State private var multiLineText = ""
     @State private var showingHelp = false    // To track if Help Sheet should be shown

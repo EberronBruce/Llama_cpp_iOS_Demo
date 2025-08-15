@@ -61,12 +61,15 @@ struct InputButton: View {
                 if let temporaryURL = temporaryURL {
                     try FileManager.default.copyItem(at: temporaryURL, to: fileURL)
                     print("Writing to \(filename) completed")
+                    
+                    Task { @MainActor in
+                        llamaState.cacheCleared = false
 
-                    llamaState.cacheCleared = false
+                        let model = Model(name: modelName, url: self.inputLink, filename: filename, status: "downloaded")
+                        llamaState.downloadedModels.append(model)
+                        status = "downloaded"
+                    }
 
-                    let model = Model(name: modelName, url: self.inputLink, filename: filename, status: "downloaded")
-                    llamaState.downloadedModels.append(model)
-                    status = "downloaded"
                 }
             } catch let err {
                 print("Error: \(err.localizedDescription)")
@@ -129,7 +132,7 @@ struct InputButton: View {
         .onDisappear() {
             downloadTask?.cancel()
         }
-        .onChange(of: llamaState.cacheCleared) { newValue in
+        .onChange(of: llamaState.cacheCleared, initial: false) { newValue, args in
             if newValue {
                 downloadTask?.cancel()
                 let fileURL = InputButton.getFileURL(filename: self.filename)
