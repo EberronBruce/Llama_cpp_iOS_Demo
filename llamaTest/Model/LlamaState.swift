@@ -15,231 +15,210 @@ struct Model: Identifiable {
     var status: String?
 }
 
+public protocol LlamaDelegate: AnyObject {
+    func didGenerateResponse(_ response: String)
+    func generateResponseFailed(_ error: Error)
+    func getTokenFromCompletionLoop(_ token: String)
+    func finishTokenFomCompletionLoop()
+    func benchMarkMessage(_ message: String)
+}
+
+
 @MainActor
-class LlamaState: ObservableObject {
-    @Published var messages: [ChatMessage] = []
-    @Published var messageLog = ""
-    @Published var cacheCleared = false
-    @Published var downloadedModels: [Model] = []
-    @Published var undownloadedModels: [Model] = []
-    let NS_PER_S = 1_000_000_000.0
+internal class LlamaState: NSObject {
+    weak var delegate: LlamaDelegate?
+    private(set) var isModelLoaded = false
+    private(set) var isGeneratingResponse = false
+    
+    private var maxToken: Int = 128
+    private var stopTokens: [String] = []
+    private(set) var messageLog = ""
+    private let NS_PER_S = 1_000_000_000.0
+    
+    @Published var isLoading: Bool = false
 
     private var llamaContext: LlamaContext?
-    private var defaultModelUrl: URL? {
-        Bundle.main.url(forResource: "ggml-model", withExtension: "gguf", subdirectory: "models")
-        // Bundle.main.url(forResource: "llama-2-7b-chat", withExtension: "Q2_K.gguf", subdirectory: "models")
+    
+    enum LoadError: Error, Equatable {
+        case couldNotLocateModel
+        case pathToModelEmpty
+        case unableToLoadModel(String)
     }
 
-    init() {
-        loadModelsFromDisk()
-        Task {
-            await loadDefaultModels()
+    override init() {
+        super.init()
+    }
+    
+    
+    func setStopTokens(tokens: [String]) {
+        stopTokens = tokens
+    }
+    
+    func setMaxToken(maxToken: Int) {
+        self.maxToken = maxToken
+    }
+    
+    
+    func loadModel(at path: String, temperature: Float, distribution: UInt32, batchCapacity: Int32, maxSequenceIdsPerToken: Int32, embeddingSize: Int32, log: Bool = false,  completion: @escaping (Result<Void, Error>) -> Void) {
+        if path.isEmpty {
+            if log { self.messageLog += "No model path specified\n" }
+            completion(.failure(LoadError.pathToModelEmpty))
+            return
         }
-        
-    }
-
-    private func loadModelsFromDisk() {
-        do {
-            let documentsURL = getDocumentsDirectory()
-            let modelURLs = try FileManager.default.contentsOfDirectory(at: documentsURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants])
-            for modelURL in modelURLs {
-                let modelName = modelURL.deletingPathExtension().lastPathComponent
-                downloadedModels.append(Model(name: modelName, url: "", filename: modelURL.lastPathComponent, status: "downloaded"))
+        guard FileManager.default.fileExists(atPath: path) else {
+            messageLog += "Model file not found at \(path)\n"
+            completion(.failure(LoadError.couldNotLocateModel))
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let context = try LlamaContext.create_context(path: path, temperature: temperature, distribution: distribution, batchCapacity: batchCapacity, maxSquenceIdsPerToken: maxSequenceIdsPerToken, embeddingSize: embeddingSize)
+                Task { @MainActor in
+                    self.llamaContext = context
+                    self.isModelLoaded = true
+                    if log { self.messageLog += "Loaded model \(path)\n" }
+                    completion(.success(()))
+                }
+            }catch {
+                Task { @MainActor in
+                    if log { self.messageLog += "\(error.localizedDescription)\n" }
+                    completion(.failure(LoadError.unableToLoadModel(error.localizedDescription)))
+                }
             }
-        } catch {
-            print("Error loading models from disk: \(error)")
         }
     }
-
-    private func loadDefaultModels() async {
-        do {
-            try await  loadModel(modelUrl: defaultModelUrl)
-        } catch {
-            messageLog += "Error!\n"
-        }
-
-        for model in defaultModels {
-            let fileURL = getDocumentsDirectory().appendingPathComponent(model.filename)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-
-            } else {
-                var undownloadedModel = model
-                undownloadedModel.status = "download"
-                undownloadedModels.append(undownloadedModel)
+    
+    func loadModel(at path: String, temperature: Float, distribution: UInt32, batchCapacity: Int32, maxSequenceIdsPerToken: Int32, embeddingSize: Int32, log: Bool = false) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            loadModel(at: path, temperature: temperature, distribution: distribution, batchCapacity: batchCapacity, maxSequenceIdsPerToken: maxSequenceIdsPerToken, embeddingSize: embeddingSize, log: log) { result in
+                switch result {
+                case .success:
+                    continuation.resume()
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
             }
         }
     }
-
-    func getDocumentsDirectory() -> URL {
-        let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
-        return paths[0]
-    }
-    private let defaultModels: [Model] = [
-        Model(name: "TinyLlama-1.1B (Q4_0, 0.6 GiB)",url: "https://huggingface.co/TheBloke/TinyLlama-1.1B-1T-OpenOrca-GGUF/resolve/main/tinyllama-1.1b-1t-openorca.Q4_0.gguf?download=true",filename: "tinyllama-1.1b-1t-openorca.Q4_0.gguf", status: "download"),
-        Model(
-            name: "TinyLlama-1.1B Chat (Q8_0, 1.1 GiB)",
-            url: "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q8_0.gguf?download=true",
-            filename: "tinyllama-1.1b-chat-v1.0.Q8_0.gguf", status: "download"
-        ),
-
-        Model(
-            name: "TinyLlama-1.1B (F16, 2.2 GiB)",
-            url: "https://huggingface.co/ggml-org/models/resolve/main/tinyllama-1.1b/ggml-model-f16.gguf?download=true",
-            filename: "tinyllama-1.1b-f16.gguf", status: "download"
-        ),
-
-        Model(
-            name: "Phi-2.7B (Q4_0, 1.6 GiB)",
-            url: "https://huggingface.co/ggml-org/models/resolve/main/phi-2/ggml-model-q4_0.gguf?download=true",
-            filename: "phi-2-q4_0.gguf", status: "download"
-        ),
-
-        Model(
-            name: "Phi-2.7B (Q8_0, 2.8 GiB)",
-            url: "https://huggingface.co/ggml-org/models/resolve/main/phi-2/ggml-model-q8_0.gguf?download=true",
-            filename: "phi-2-q8_0.gguf", status: "download"
-        ),
-
-        Model(
-            name: "Mistral-7B-v0.1 (Q4_0, 3.8 GiB)",
-            url: "https://huggingface.co/TheBloke/Mistral-7B-v0.1-GGUF/resolve/main/mistral-7b-v0.1.Q4_0.gguf?download=true",
-            filename: "mistral-7b-v0.1.Q4_0.gguf", status: "download"
-        ),
-        Model(
-            name: "OpenHermes-2.5-Mistral-7B (Q3_K_M, 3.52 GiB)",
-            url: "https://huggingface.co/TheBloke/OpenHermes-2.5-Mistral-7B-GGUF/resolve/main/openhermes-2.5-mistral-7b.Q3_K_M.gguf?download=true",
-            filename: "openhermes-2.5-mistral-7b.Q3_K_M.gguf", status: "download"
-        )
-    ]
-    func loadModel(modelUrl: URL?) async throws {
-        if let modelUrl {
-            messageLog += "Loading model...\n"
-            self.messages.append(ChatMessage(text: "Loading model...", isUser: false))
-            llamaContext = try await LlamaContext.create_context(path: modelUrl.path())
-            messageLog += "Loaded model \(modelUrl.lastPathComponent)\n"
-            self.messages.append(ChatMessage(text: "Loaded model \(modelUrl.lastPathComponent)", isUser: false))
-
-            // Assuming that the model is successfully loaded, update the downloaded models
-            updateDownloadedModels(modelName: modelUrl.lastPathComponent, status: "downloaded")
-        } else {
-            messageLog += "Load a model from the list below\n"
-        }
-    }
-
-
-    private func updateDownloadedModels(modelName: String, status: String) {
-        undownloadedModels.removeAll { $0.name == modelName }
-    }
-
-
-    func complete(text: String) async {
+    
+    
+    
+    func promptGenerateResponse(prompt: String) async {
         guard let llamaContext else {
             return
         }
-
-//        let t_start = DispatchTime.now().uptimeNanoseconds
-//        await llamaContext.completion_init(text: text)
-//        let t_heat_end = DispatchTime.now().uptimeNanoseconds
-//        let t_heat = Double(t_heat_end - t_start) / NS_PER_S
-
-        
-        Task.detached(priority: .userInitiated) {
-            
-            await llamaContext.feedPrompt(text)
-
-            await MainActor.run {
-//                self.messageLog += "Me: \(text)\n"
-                self.messages.append(ChatMessage(text: text, isUser: true))
-            }
-            
-            let result = await llamaContext.generateResponse(maxTokens: 256)
-            await MainActor.run {
-                //                self.messageLog += "It: \(result)"
-                //                self.messageLog += "\nDone\n"
-                self.messages.append(ChatMessage(text: result, isUser: false))
-            }
-//            let result = await llamaContext.completion_loop()
-            
-//            await llamaContext.feedPrompt(text)
-//            
-//            while await !llamaContext.is_done {
-//                let result = await llamaContext.completion_loop()
-//                print(result, terminator: "")
-//                
-//                await MainActor.run {
-//                    //                self.messageLog += "It: \(result)"
-//                    //                self.messageLog += "\nDone\n"
-//                    self.messages.append(ChatMessage(text: result, isUser: false))
-//                }
-//            }
+        do {
+            isGeneratingResponse = true
+            try await llamaContext.feedPrompt(prompt)
+            let response = try await llamaContext.generateResponse(maxTokens: maxToken, stop: stopTokens)
+            isGeneratingResponse = false
+            delegate?.didGenerateResponse(response)
+        } catch {
+            delegate?.generateResponseFailed(error)
         }
-
-
-//        Task.detached {
-//            while await !llamaContext.is_done {
-////                let result = await llamaContext.completion_loop()
-//                let result = await llamaContext.generateResponse(maxTokens: 128)
-//                await MainActor.run {
-//                    self.messageLog += "It: \(result)"
-//                }
-//            }
-//            
-//            await MainActor.run {
-//                self.messageLog += "\nDone\n"
-//            }
-
-//            let t_end = DispatchTime.now().uptimeNanoseconds
-//            let t_generation = Double(t_end - t_heat_end) / self.NS_PER_S
-//            let tokens_per_second = Double(await llamaContext.n_len) / t_generation
-
-//            await llamaContext.clear()
-
-//            await MainActor.run {
-//                self.messageLog += """
-//                    \n
-//                    Done
-//                    Heat up took \(t_heat)s
-//                    Generated \(tokens_per_second) t/s\n
-//                    """
-//            }
-//        }
     }
+    
+    func promptCompletionLoop(prompt: String) async {
+        guard let llamaContext else {
+            return
+        }
+        
+        do {
+            try await llamaContext.feedPrompt(prompt)
+
+            while await !llamaContext.is_done {
+                let result = try await llamaContext.completion_loop()
+                if stopTokens.contains(where: { result.contains($0) }) {
+                    await llamaContext.markDone()
+                    break
+                }
+                delegate?.getTokenFromCompletionLoop(result)
+            }
+            delegate?.finishTokenFomCompletionLoop()
+        } catch {
+            delegate?.generateResponseFailed(error)
+        }
+    }
+    
+    func CompleteLoop(prompt: String) async {
+        guard let llamaContext else {
+            return
+        }
+        do {
+            try await llamaContext.completion_init(text: prompt)
+            while await !llamaContext.is_done {
+                let result = try await llamaContext.completion_loop()
+                if stopTokens.contains(where: { result.contains($0) }) {
+                    await llamaContext.markDone()
+                    break
+                }
+                delegate?.getTokenFromCompletionLoop(result)
+            }
+            delegate?.finishTokenFomCompletionLoop()
+        } catch {
+            delegate?.generateResponseFailed(error)
+        }
+    }
+    
+    func CompleteGenerateResponst(prompt: String) async {
+        guard let llamaContext else {
+            return
+        }
+        do {
+            try await llamaContext.completion_init(text: prompt)
+            let result = try await llamaContext.generateResponse(maxTokens: maxToken, stop: stopTokens)
+            
+            let trimmedResponse = result
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet.punctuationCharacters)
+            delegate?.didGenerateResponse(trimmedResponse)
+        } catch {
+            delegate?.generateResponseFailed(error)
+        }
+    }
+
 
     func bench() async {
         guard let llamaContext else {
             return
         }
 
-        messageLog += "\n"
-        messageLog += "Running benchmark...\n"
-        messageLog += "Model info: "
-        messageLog += await llamaContext.model_info() + "\n"
+        print("\n")
+        delegate?.benchMarkMessage("Running benchmark....\n")
+        print("Running benchmark...\n")
+        print("Model info: ")
+        
+        let modelInfo = await llamaContext.model_info()
+        delegate?.benchMarkMessage("Model info: \(modelInfo)\n")
+        print("\(modelInfo) \n")
 
         let t_start = DispatchTime.now().uptimeNanoseconds
         let _ = await llamaContext.bench(pp: 8, tg: 4, pl: 1) // heat up
         let t_end = DispatchTime.now().uptimeNanoseconds
 
         let t_heat = Double(t_end - t_start) / NS_PER_S
-        messageLog += "Heat up time: \(t_heat) seconds, please wait...\n"
+        delegate?.benchMarkMessage("Heat up time: \(t_heat) seconds, please wait...\n")
+        print("Heat up time: \(t_heat) seconds, please wait...\n")
 
         // if more than 5 seconds, then we're probably running on a slow device
         if t_heat > 5.0 {
-            messageLog += "Heat up time is too long, aborting benchmark\n"
+            delegate?.benchMarkMessage("Heat up time is too long, aborting benchmark\n")
+            print("Heat up time is too long, aborting benchmark\n")
             return
         }
 
         let result = await llamaContext.bench(pp: 512, tg: 128, pl: 1, nr: 3)
 
-        messageLog += "\(result)"
-        messageLog += "\n"
+        delegate?.benchMarkMessage(result)
+        print(result)
+        print("\n")
     }
 
     func clear() async {
         guard let llamaContext else {
             return
         }
-
         await llamaContext.clear()
-        messageLog = ""
     }
+    
 }

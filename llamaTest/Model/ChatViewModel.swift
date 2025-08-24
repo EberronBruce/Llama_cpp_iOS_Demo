@@ -14,14 +14,4 @@ struct ChatMessage: Identifiable {
 }
 
 
-//class ChatViewModel: ObservableObject {
-//    @Published var messages: [Message] = []
-//    
-//    func addUserMessage(_ text: String) {
-//        messages.append(Message(role: "user", text: text))
-//    }
-//    
-//    func addAssistantMessage(_ text: String) {
-//        messages.append(Message(role: "assistant", text: text))
-//    }
-//}
+
