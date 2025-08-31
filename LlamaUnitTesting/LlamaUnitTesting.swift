@@ -49,7 +49,7 @@ struct LlamaUnitTesting {
         let mockDelegate = MockDelegate()
         state.delegate = mockDelegate
         
-        await state.CompleteLoop(prompt: "Test Loop")
+        await state.CompleteLoop(prompt: "Test Loop", generationLength: 128)
         
         #expect(mockDelegate.tokens.contains("Loop1"))
         #expect(mockDelegate.tokens.contains("Loop2"))
@@ -64,7 +64,7 @@ struct LlamaUnitTesting {
         let mockDelegate = MockDelegate()
         state.delegate = mockDelegate
         
-        await state.CompleteGenerateResponst(prompt: "Test Prompt")
+        await state.CompleteGenerateResponst(prompt: "Test Prompt", generationLength: 128)
         
         #expect(mockDelegate.didGenerateResponseCalled == true)
         #expect(mockDelegate.lastResponse == "Complete Response")
