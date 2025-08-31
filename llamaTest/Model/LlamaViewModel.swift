@@ -7,6 +7,15 @@
 
 import Foundation
 
+
+struct Model: Identifiable {
+    var id = UUID()
+    var name: String
+    var url: String
+    var filename: String
+    var status: String?
+}
+
 class LlamaViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var messageLog = ""

@@ -6,14 +6,8 @@
 //
 
 import Foundation
+import UIKit
 
-struct Model: Identifiable {
-    var id = UUID()
-    var name: String
-    var url: String
-    var filename: String
-    var status: String?
-}
 
 public protocol LlamaDelegate: AnyObject {
     func didGenerateResponse(_ response: String)
@@ -21,6 +15,7 @@ public protocol LlamaDelegate: AnyObject {
     func getTokenFromCompletionLoop(_ token: String)
     func finishTokenFomCompletionLoop()
     func benchMarkMessage(_ message: String)
+    func didRecieveMemoryWarning()
 }
 
 
@@ -34,19 +29,64 @@ internal class LlamaState: NSObject {
     private var stopTokens: [String] = []
     private(set) var messageLog = ""
     private let NS_PER_S = 1_000_000_000.0
-    
-    @Published var isLoading: Bool = false
 
-    private var llamaContext: LlamaContext?
+    private var llamaContext: LlamaContextProtocol?
     
     enum LoadError: Error, Equatable {
         case couldNotLocateModel
         case pathToModelEmpty
         case unableToLoadModel(String)
     }
-
+    
     override init() {
         super.init()
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil
+        )
+    }
+    
+    // test initializer lets you inject a mock
+    init(testContext: LlamaContextProtocol) {
+        super.init()
+        self.llamaContext = testContext
+        
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleMemoryWarning),
+            name: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil
+        )
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self,
+            name: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil
+        )
+    }
+    
+    
+    @objc private func handleMemoryWarning() {
+        // Free up memory here
+        print("⚠️ Memory warning received. Attempting to unload model…")
+        
+        // Example: unload model if safe
+        if isModelLoaded {
+            unloadModel()
+        }
+        
+        delegate?.didRecieveMemoryWarning()
+    }
+    
+    func unloadModel() {
+        // Free llama.cpp memory, contexts, etc.
+        isGeneratingResponse = false
+        llamaContext = nil
+        isModelLoaded = false
     }
     
     
@@ -140,12 +180,12 @@ internal class LlamaState: NSObject {
         }
     }
     
-    func CompleteLoop(prompt: String) async {
+    func CompleteLoop(prompt: String, generationLength: Int32) async {
         guard let llamaContext else {
             return
         }
         do {
-            try await llamaContext.completion_init(text: prompt)
+            try await llamaContext.completion_init(text: prompt, generationLength: generationLength)
             while await !llamaContext.is_done {
                 let result = try await llamaContext.completion_loop()
                 if stopTokens.contains(where: { result.contains($0) }) {
@@ -160,12 +200,12 @@ internal class LlamaState: NSObject {
         }
     }
     
-    func CompleteGenerateResponst(prompt: String) async {
+    func CompleteGenerateResponst(prompt: String, generationLength: Int32) async {
         guard let llamaContext else {
             return
         }
         do {
-            try await llamaContext.completion_init(text: prompt)
+            try await llamaContext.completion_init(text: prompt, generationLength: generationLength)
             let result = try await llamaContext.generateResponse(maxTokens: maxToken, stop: stopTokens)
             
             let trimmedResponse = result
@@ -193,7 +233,7 @@ internal class LlamaState: NSObject {
         print("\(modelInfo) \n")
 
         let t_start = DispatchTime.now().uptimeNanoseconds
-        let _ = await llamaContext.bench(pp: 8, tg: 4, pl: 1) // heat up
+        let _ = await llamaContext.bench(pp: 8, tg: 4, pl: 1, nr: 1) // heat up
         let t_end = DispatchTime.now().uptimeNanoseconds
 
         let t_heat = Double(t_end - t_start) / NS_PER_S

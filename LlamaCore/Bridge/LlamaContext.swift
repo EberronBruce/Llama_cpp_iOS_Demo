@@ -3,7 +3,7 @@ import llama
 import MachO
 import Darwin
 
-enum LlamaError: Error {
+public enum LlamaError: Error {
     case modelLoadFailed
     case contextInitFailed
     case memoryQueryFailed

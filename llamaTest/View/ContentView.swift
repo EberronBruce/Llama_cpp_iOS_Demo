@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import LlamaCore
 
 struct ContentView: View {
     @StateObject var bridge = LlamaBridge()
@@ -21,7 +22,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack{
                 VStack {
                     messageList
@@ -96,13 +97,13 @@ struct ContentView: View {
                 do{
                     bridge.isLoading = true
                     bridge.messages.append(ChatMessage(text: "Loading model...", isUser: false))
-                    let modelPath = Bundle.main.path(forResource: "phi-2-q4_0", ofType: "gguf")!
+                    let modelPath = Bundle.main.path(forResource: "tinyllamaChat", ofType: "gguf")!
                     try await self.llama.initializeModel(at: modelPath, temperature: 0.5, distribution: 1234, batchCapacity: 512, maxSequenceIdsPerToken: 1, embeddingSize: 0)
 //                    try await self.llamaState.loadModel(at: modelPath, temperature: 0.5, distribution: 1234, batchCapacity: 512, maxSequenceIdsPerToken: 1, embeddingSize: 0)
                     bridge.isLoading = false
                     let model = extractModelName(from: modelPath)
                     bridge.messages.append(ChatMessage(text: "Model: \(model) Loaded", isUser: false))
-                    self.llama.setStopTokens(tokens: ["<END>", "User:"])
+                    self.llama.setStopTokens(tokens: ["\nUser:", "<END>", "User:"])
                     self.llama.setMaxToken(maxToken: 512)
                 } catch {
                     bridge.messages.append(ChatMessage(text: error.localizedDescription, isUser: false))
@@ -123,7 +124,7 @@ struct ContentView: View {
         userMessage = ""
         Task(priority: .userInitiated) {
             bridge.isLoading = true
-            let fullPrompt = systemPrompt + "User:" + messageCopy + ".<END>"
+            let fullPrompt = systemPrompt + "\nUser: " + messageCopy + "\nAssistant:"
             await llama.promptGenerateResponse(prompt: fullPrompt)
         }
 
@@ -174,6 +175,10 @@ struct ChatBubble: View {
 }
 
 class LlamaBridge: ObservableObject, LlamaDelegate {
+    func didRecieveMemoryWarning() {
+        messages.append(ChatMessage(text: "Memory Warning detected. Must need to reload model", isUser: false))
+    }
+    
     @Published var messages : [ChatMessage] = []
     @Published var isLoading: Bool = false
     func didGenerateResponse(_ response: String) {
