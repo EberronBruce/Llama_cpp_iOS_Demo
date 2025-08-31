@@ -170,7 +170,6 @@ internal actor LlamaContext {
         // Simulator never has GPU acceleration
         model_params.n_gpu_layers = 0
         print("[INFO] Running in simulator. Forcing n_gpu_layers=0.")
-        print("Hello")
         guard let m = llama_model_load_from_file(path, model_params) else {
             throw LlamaError.couldNotInitializeContext
         }
