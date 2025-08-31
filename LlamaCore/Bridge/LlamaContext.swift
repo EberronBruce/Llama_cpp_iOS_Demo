@@ -12,6 +12,7 @@ public enum LlamaError: Error {
     case tokenizationFailed
     case tokenToPieceFailed(token: llama_token)
     case batchPointerNil(String)
+    case couldNotInitializeContext
 }
 
 internal actor LlamaContext {
@@ -169,6 +170,8 @@ internal actor LlamaContext {
         // Simulator never has GPU acceleration
         model_params.n_gpu_layers = 0
         print("[INFO] Running in simulator. Forcing n_gpu_layers=0.")
+        print("!!DEBUG Model Path: \(path)")
+        print("!!DEBUG Model_Params: \(model_params)")
         guard let m = llama_model_load_from_file(path, model_params) else {
             throw LlamaError.couldNotInitializeContext
         }
