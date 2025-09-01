@@ -74,19 +74,16 @@ internal class LlamaState: NSObject {
         // Free up memory here
         print("⚠️ Memory warning received. Attempting to unload model…")
         
-        // Example: unload model if safe
-        if isModelLoaded {
-            unloadModel()
-        }
-        
         delegate?.didRecieveMemoryWarning()
     }
     
     func unloadModel() {
         // Free llama.cpp memory, contexts, etc.
-        isGeneratingResponse = false
-        llamaContext = nil
-        isModelLoaded = false
+        if isModelLoaded  {
+            isGeneratingResponse = false
+            llamaContext = nil
+            isModelLoaded = false
+        }
     }
     
     
