@@ -1,0 +1,54 @@
+// swift-interface-format-version: 1.0
+// swift-compiler-version: Apple Swift version 6.1.2 effective-5.10 (swiftlang-6.1.2.1.2 clang-1700.0.13.5)
+// swift-module-flags: -target x86_64-apple-ios18.5-simulator -enable-objc-interop -enable-library-evolution -swift-version 5 -enforce-exclusivity=checked -O -enable-experimental-feature DebugDescriptionMacro -enable-bare-slash-regex -module-name LlamaCore
+// swift-module-flags-ignorable:  -interface-compiler-version 6.1.2
+import Darwin
+import Foundation
+import MachO
+import Swift
+import UIKit
+import _Concurrency
+import _StringProcessing
+import _SwiftConcurrencyShims
+import llama
+public enum LlamaError : Swift.Error {
+  case modelLoadFailed
+  case contextInitFailed
+  case memoryQueryFailed
+  case batchCapacityExceeded
+  case decodeFailed(code: Swift.Int32)
+  case tokenizationFailed
+  case tokenToPieceFailed(token: llama.llama_token)
+  case batchPointerNil(Swift.String)
+  case couldNotInitializeContext
+}
+@_Concurrency.MainActor public class Llama {
+  @_Concurrency.MainActor public init()
+  @_Concurrency.MainActor weak public var delegate: (any LlamaCore.LlamaDelegate)? {
+    get
+    set
+  }
+  @_Concurrency.MainActor public func isModelLoaded() -> Swift.Bool
+  @_Concurrency.MainActor public func isGeneratingResponse() -> Swift.Bool
+  @_Concurrency.MainActor public func setStopTokens(tokens: [Swift.String])
+  @_Concurrency.MainActor public func setMaxToken(maxToken: Swift.Int)
+  @_Concurrency.MainActor public func clear() async
+  @_Concurrency.MainActor public func unloadModel()
+  @_Concurrency.MainActor public func initializeModel(at path: Swift.String, temperature: Swift.Float = 0.5, distribution: Swift.UInt32 = 1234, batchCapacity: Swift.Int32 = 512, maxSequenceIdsPerToken: Swift.Int32 = 1, embeddingSize: Swift.Int32 = 0, log: Swift.Bool = false, completion: @escaping (Swift.Result<Swift.Void, any Swift.Error>) -> Swift.Void)
+  @_Concurrency.MainActor public func initializeModel(at path: Swift.String, temperature: Swift.Float = 0.5, distribution: Swift.UInt32 = 1234, batchCapacity: Swift.Int32 = 512, maxSequenceIdsPerToken: Swift.Int32 = 1, embeddingSize: Swift.Int32 = 0, log: Swift.Bool = false) async throws
+  @_Concurrency.MainActor public func promptGenerateResponse(prompt: Swift.String) async
+  @_Concurrency.MainActor public func promptCompletionLoop(prompt: Swift.String) async
+  @_Concurrency.MainActor public func CompleteLoop(prompt: Swift.String, generationLength: Swift.Int32 = 128) async
+  @_Concurrency.MainActor public func CompleteGenerateResponst(prompt: Swift.String, generationLength: Swift.Int32 = 128) async
+  @_Concurrency.MainActor public func getMessageLogs() -> Swift.String
+  @objc deinit
+}
+public protocol LlamaDelegate : AnyObject {
+  func didGenerateResponse(_ response: Swift.String)
+  func generateResponseFailed(_ error: any Swift.Error)
+  func getTokenFromCompletionLoop(_ token: Swift.String)
+  func finishTokenFomCompletionLoop()
+  func benchMarkMessage(_ message: Swift.String)
+  func didRecieveMemoryWarning()
+}
+extension LlamaCore.Llama : Swift.Sendable {}

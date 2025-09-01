@@ -4,6 +4,9 @@ A lightweight Swift interface for managing llama.cpp models, contexts, and infer
 
 ## Overview
 
+`LlamaCore` builds on top of [llama.cpp](https://github.com/ggerganov/llama.cpp),  
+Georgi Gerganov’s high-performance C/C++ inference engine for running LLaMA and other large language models efficiently on CPU and mobile devices.
+
 `LlamaCore` provides the core functionality needed to integrate and run Large Language Models (LLMs) locally on iOS.  
 It is responsible for:
 
